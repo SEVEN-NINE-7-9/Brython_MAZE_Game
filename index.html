@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Voice Maze — Brython Voice-Controlled Maze Game</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; --bg:#0b1220; --panel:#0f172a; --accent:#22d3ee; color-scheme: dark; }
+    body { margin:0; background:var(--bg); color:#e6eef6; }
+    header { padding:12px 16px; display:flex; align-items:center; gap:12px; border-bottom:1px solid #11202b; }
+    header h1 { margin:0; font-size:18px; }
+    main { display:grid; grid-template-columns: 320px 1fr; gap:16px; padding:16px; height:calc(100vh - 52px); box-sizing:border-box; }
+    .panel { background:var(--panel); border:1px solid #16232b; border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:12px; }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; }
+    button { background:#071827; border:1px solid #16323b; color:#dff6fb; padding:8px 12px; border-radius:10px; cursor:pointer; font-weight:600; }
+    button.primary { background:var(--accent); color:#052028; border-color:transparent; }
+    #log { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; background:#06151a; border:1px dashed #12323a; padding:8px; border-radius:8px; overflow:auto; min-height:80px; max-height:160px; }
+    .hint { color:#9fb6c1; font-size:13px; }
+    .canvasWrap { display:flex; align-items:center; justify-content:center; position:relative; }
+    canvas { background: #071018; border-radius:8px; box-shadow: 0 6px 18px rgba(0,0,0,0.6); touch-action:none; }
+    .statRow { display:flex; gap:8px; align-items:center; font-weight:600; flex-wrap:wrap; }
+    .badge { background:#07272f; padding:6px 8px; border-radius:8px; border:1px solid #0e4048; }
+    .center { display:flex; justify-content:center; align-items:center; }
+    .muted { color:#93a8b0; font-size:13px; }
+    #timerBadge { position:absolute; top:8px; right:8px; z-index:5; }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; height:auto; }
+    }
+  </style>
+
+  <!-- Brython -->
+  <script src="https://cdn.jsdelivr.net/npm/brython@3.12.3/brython.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/brython@3.12.3/brython_stdlib.js"></script>
+</head>
+<body>
+  <header>
+    <h1>🧭 Voice Maze</h1>
+    <div class="muted">Voice control + keyboard — collect coins and reach the exit</div>
+  </header>
+
+  <main>
+    <section class="panel" id="leftPanel">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:800">Game Menu</div>
+          <div class="muted" style="font-size:13px">Voice-controlled maze</div>
+        </div>
+        <div class="badge">Brython + Web Speech</div>
+      </div>
+
+      <div class="controls">
+        <button id="btnPlay" class="primary">Play (voice)</button>
+        <button id="btnStop">Stop</button>
+        <button id="btnNew">New Maze</button>
+      </div>
+
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <div class="badge">Grid: <span id="gridSize">25×25</span></div>
+        <div class="badge">Coins: <span id="coinCount">0</span></div>
+        <div class="badge">Score: <span id="score">0</span></div>
+      </div>
+
+      <div id="log" aria-live="polite"></div>
+
+      <details>
+        <summary style="cursor:pointer;font-weight:700">How to Play</summary>
+        <div style="margin-top:8px; color:#9fb6c1; line-height:1.4; font-size:14px;">
+          <ul>
+            <li>Press <strong>Play (voice)</strong> — Chrome/Edge desktop recommended.</li>
+            <li>Say: <em>up</em>, <em>down</em>, <em>left</em>, <em>right</em> (also accepts "go left", "move up", etc.).</li>
+            <li>Collect all coins and reach the exit (green).</li>
+            <li>Use arrow keys / WASD as a fallback.</li>
+          </ul>
+        </div>
+      </details>
+      <div class="hint">Tip: Allow mic permission and speak clearly; logs show recognized text.</div>
+    </section>
+
+    <section class="panel canvasWrap">
+      <div id="timerBadge" class="badge">Time: 0s</div>
+
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px;width:100%;">
+        <div class="statRow">
+          <div class="badge">Coins left: <span id="coinsLeft">0</span></div>
+          <div class="badge">Moves: <span id="moves">0</span></div>
+        </div>
+        <canvas id="gameCanvas"></canvas>
+        <div class="center muted" style="width:100%;font-size:13px">Start is blue, Player is yellow, Coins are gold, Exit is green</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Python (Brython) -->
+  <script type="text/python">
+from browser import document, window, html, timer
+import random, math, re
+
+# CONFIG
+GRID = 25           # grid cells per side
+CELL = 22           # pixels per cell (adjust to fit canvas)
+CANVAS_SIZE = GRID * CELL
+COIN_PERCENT = 0.06
+
+# DOM refs
+canvas = document["gameCanvas"]
+canvas.attrs["width"] = str(CANVAS_SIZE)
+canvas.attrs["height"] = str(CANVAS_SIZE)
+ctx = canvas.getContext("2d")
+
+log_el = document["log"]
+btnPlay = document["btnPlay"]
+btnStop = document["btnStop"]
+btnNew = document["btnNew"]
+coinCount_el = document["coinCount"]
+score_el = document["score"]
+coinsLeft_el = document["coinsLeft"]
+gridSize_el = document["gridSize"]
+moves_el = document["moves"]
+timer_el = document["timerBadge"]
+
+gridSize_el.text = f"{GRID}×{GRID}"
+
+# Game state
+maze = None
+player = None
+start = None
+end = None
+coins = set()
+score = 0
+moves = 0
+
+# Timer
+time_elapsed = 0
+timer_running = False
+
+is_listening = False
+
+# Logging (keep last 10, remove oldest correctly)
+def log(msg):
+    el = html.DIV(msg)
+    log_el <= el
+    while len(log_el.children) > 10:
+        # remove the first child (oldest)
+        log_el.removeChild(log_el.children[0])
+    log_el.scrollTop = log_el.scrollHeight
+
+# Maze generation: DFS backtracker — guarantees a perfect maze (connected)
+def make_maze(n):
+    # store which directions are open for each cell, e.g. {"up","right",...}
+    m = {(r,c): set() for r in range(n) for c in range(n)}
+    stack = [(0,0)]
+    visited = {(0,0)}
+    while stack:
+        r,c = stack[-1]
+        neighbors = []
+        for dr,dc,dir_to_neighbor,dir_back in [(-1,0,"up","down"),(1,0,"down","up"),(0,-1,"left","right"),(0,1,"right","left")]:
+            nr, nc = r+dr, c+dc
+            if 0 <= nr < n and 0 <= nc < n and (nr,nc) not in visited:
+                neighbors.append((nr,nc,dir_to_neighbor,dir_back))
+        if neighbors:
+            nr,nc,dir_to_neighbor,dir_back = random.choice(neighbors)
+            m[(r,c)].add(dir_to_neighbor)
+            m[(nr,nc)].add(dir_back)
+            visited.add((nr,nc))
+            stack.append((nr,nc))
+        else:
+            stack.pop()
+    return m
+
+# Drawing
+def draw():
+    ctx.clearRect(0,0,CANVAS_SIZE,CANVAS_SIZE)
+    # background
+    ctx.fillStyle = "#071018"
+    ctx.fillRect(0,0,CANVAS_SIZE,CANVAS_SIZE)
+
+    # walls: draw as white lines
+    ctx.strokeStyle = "white"
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    for r in range(GRID):
+        for c in range(GRID):
+            x = c*CELL
+            y = r*CELL
+            dirs = maze[(r,c)]
+            if "up" not in dirs:    ctx.moveTo(x,y);         ctx.lineTo(x+CELL,y)
+            if "right" not in dirs: ctx.moveTo(x+CELL,y);    ctx.lineTo(x+CELL,y+CELL)
+            if "down" not in dirs:  ctx.moveTo(x,y+CELL);    ctx.lineTo(x+CELL,y+CELL)
+            if "left" not in dirs:  ctx.moveTo(x,y);         ctx.lineTo(x,y+CELL)
+    ctx.stroke()
+
+    # draw coins
+    for (r,c) in coins:
+        cx = c*CELL + CELL/2
+        cy = r*CELL + CELL/2
+        ctx.beginPath()
+        ctx.fillStyle = "#f7c948"
+        ctx.arc(cx,cy, CELL*0.25, 0, 2*math.pi)
+        ctx.fill()
+
+    # exit (end)
+    er,ec = end
+    ctx.fillStyle = "#1fbf6f"
+    ctx.fillRect(ec*CELL+4, er*CELL+4, CELL-8, CELL-8)
+
+    # start marker
+    sr,sc = start
+    ctx.fillStyle = "#2f7fb3"
+    ctx.fillRect(sc*CELL+6, sr*CELL+6, CELL-12, CELL-12)
+
+    # player
+    pr,pc = player
+    ctx.fillStyle = "#ffd05c"
+    ctx.fillRect(pc*CELL+6, pr*CELL+6, CELL-12, CELL-12)
+
+# movement checking
+def can_move(r,c,direction):
+    if direction=="up":
+        if r<=0: return False
+        return "up" in maze[(r,c)]
+    if direction=="right":
+        if c>=GRID-1: return False
+        return "right" in maze[(r,c)]
+    if direction=="down":
+        if r>=GRID-1: return False
+        return "down" in maze[(r,c)]
+    if direction=="left":
+        if c<=0: return False
+        return "left" in maze[(r,c)]
+    return False
+
+
+def move_player(direction):
+    global player, score, moves
+    r,c = player
+    if not can_move(r,c,direction):
+        log(f"🔒 Can't move {direction} — wall.")
+        return False
+    nr, nc = r, c
+    if direction=="up": nr -= 1
+    if direction=="down": nr += 1
+    if direction=="left": nc -= 1
+    if direction=="right": nc += 1
+    player = (nr, nc)
+    moves += 1
+    moves_el.text = str(moves)
+    # coin collect
+    if (nr,nc) in coins:
+        coins.remove((nr,nc))
+        log("✨ Collected a coin!")
+        update_status()
+        if len(coins)==0:
+            log("All coins collected — head to the exit (green)!")
+    # reached end
+    if (nr,nc) == end:
+        if len(coins)==0:
+            log("🏁 You reached the exit and won! 🎉")
+            log(f"Total moves: {moves}")
+            stop_listening()
+            stop_timer()
+            window.alert(f"You won! Moves: {moves} — Time: {time_elapsed}s")
+        else:
+            log("🚪 You reached the exit, but there are still coins to collect.")
+    draw()
+    return True
+
+
+def update_status():
+    total = GRID*GRID
+    coin_target = max(1, int(total * COIN_PERCENT))
+    coinCount_el.text = str(coin_target)
+    score_el.text = str(coin_target - len(coins))
+    coinsLeft_el.text = str(len(coins))
+
+# New game
+def new_game(ev=None):
+    global maze, start, end, coins, player, score, moves
+    # clear logs
+    log_el.clear()
+    maze = make_maze(GRID)
+    start = (0,0)
+    end = (GRID-1, GRID-1)
+    player = start
+    # place coins avoiding start/end
+    coins.clear()
+    total_cells = GRID*GRID
+    coin_target = max(1, int(total_cells * COIN_PERCENT))
+    attempts = 0
+    while len(coins) < coin_target and attempts < total_cells*10:
+        r = random.randint(0, GRID-1)
+        c = random.randint(0, GRID-1)
+        if (r,c) in (start,end):
+            attempts += 1
+            continue
+        coins.add((r,c))
+        attempts += 1
+    score = 0
+    moves = 0
+    moves_el.text = str(moves)
+    update_status()
+    draw()
+    log("🆕 New maze generated. Press Play to control with voice, or use arrow keys.")
+    start_timer()
+
+# Voice parsing
+def parse_command(text):
+    if not text:
+        return None
+    text = text.lower()
+    mapping = {
+        "up":"up","top":"up","north":"up",
+        "down":"down","south":"down",
+        "left":"left","right":"right",
+        "go up":"up","go down":"down","go left":"left","go right":"right",
+        "move up":"up","move down":"down","move left":"left","move right":"right",
+    }
+    for k,v in mapping.items():
+        if k in text:
+            return v
+    if re.search(r"\bup\b", text): return "up"
+    if re.search(r"\bdown\b", text): return "down"
+    if re.search(r"\bleft\b", text): return "left"
+    if re.search(r"\bright\b", text): return "right"
+    return None
+
+
+def handle_voice(raw):
+    if not raw:
+        return
+    log(f"🎤 {raw}")
+    cmd = parse_command(raw)
+    if not cmd:
+        log("❓ Voice not recognized as a direction. Say up/down/left/right.")
+        return
+    move_player(cmd)
+
+# Expose handlers to JS
+window.pyHandleVoice = handle_voice
+window.move_player = move_player
+
+# Keyboard fallback (prevent arrow keys from scrolling page)
+def on_key(ev):
+    k = ev.key.lower()
+    if k in ("arrowup","w","arrowdown","s","arrowleft","a","arrowright","d"):
+        try:
+            ev.preventDefault()
+        except Exception:
+            pass
+    if k in ("arrowup","w"):
+        move_player("up")
+    elif k in ("arrowdown","s"):
+        move_player("down")
+    elif k in ("arrowleft","a"):
+        move_player("left")
+    elif k in ("arrowright","d"):
+        move_player("right")
+
+# Bind to document so it works without focusing canvas
+document.bind("keydown", on_key)
+
+# Speech control helpers
+
+def start_listening(ev=None):
+    global is_listening
+    if is_listening:
+        return
+    try:
+        window.startRecognition()
+        is_listening = True
+        log("🎧 Listening for voice commands...")
+    except Exception as e:
+        is_listening = False
+        log(f"⚠️ Could not start recognition: {e}")
+
+
+def stop_listening(ev=None):
+    global is_listening
+    is_listening = False
+    try:
+        window.stopRecognition()
+        log("⏹️ Stopped listening.")
+    except Exception as e:
+        log(f"⚠️ Could not stop recognition: {e}")
+
+btnPlay.bind("click", start_listening)
+btnStop.bind("click", stop_listening)
+btnNew.bind("click", new_game)
+
+# Timer functions
+def update_timer():
+    global time_elapsed
+    if timer_running:
+        time_elapsed += 1
+        timer_el.text = f"Time: {time_elapsed}s"
+
+def start_timer():
+    global timer_running, time_elapsed
+    time_elapsed = 0
+    timer_running = True
+    timer_el.text = "Time: 0s"
+
+
+def stop_timer():
+    global timer_running
+    timer_running = False
+
+# run timer tick every second regardless; gate by timer_running
+_timer_id = timer.set_interval(update_timer, 1000)
+
+# init
+def _init():
+    new_game()
+
+_init()
+  </script>
+
+  <!-- JS: SpeechRecognition glue (must be defined before brython() so Python can call window.startRecognition) -->
+  <script>
+    (function(){
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      let rec = null;
+      let listening = false;
+
+      window.startRecognition = function(){
+        if(!SR){
+          alert("SpeechRecognition not supported in this browser. Use Chrome/Edge desktop.");
+          throw new Error("SpeechRecognition unsupported");
+        }
+        if(rec){ try { rec.stop(); } catch(e){} rec = null; }
+        rec = new SR();
+        rec.lang = "en-US";
+        rec.interimResults = false;
+        rec.continuous = true;
+        rec.onresult = function(e){
+          const idx = e.results.length - 1;
+          const transcript = e.results[idx][0].transcript.trim();
+          if(window.pyHandleVoice){
+            try { window.pyHandleVoice(transcript); } catch(err) { console.error("pyHandleVoice error", err); }
+          } else {
+            const cmd = transcript.toLowerCase().split(/\s+/)[0];
+            if(["up","down","left","right"].includes(cmd) && window.move_player){
+              try { window.move_player(cmd); } catch(err){ console.error(err); }
+            }
+          }
+        };
+        rec.onerror = function(ev){
+          console.warn("Speech error", ev);
+        };
+        rec.onend = function(){
+          if(listening){
+            try { rec.start(); } catch(e) { console.warn("Restart failed", e); }
+          }
+        };
+        try { rec.start(); listening = true; } catch(e) { console.error(e); throw e; }
+      };
+
+      window.stopRecognition = function(){
+        listening = false;
+        if(rec){
+          try { rec.stop(); } catch(e) { console.warn(e); }
+          rec = null;
+        }
+      };
+
+      window.addEventListener("beforeunload", function(){ if(rec) try{ rec.stop() }catch(e){} });
+    })();
+  </script>
+
+  <!-- Finally initialize Brython (runs <script type="text/python"> blocks) -->
+  <script>brython();</script>
+</body>
+</html>
